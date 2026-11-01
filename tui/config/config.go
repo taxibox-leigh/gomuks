@@ -103,6 +103,10 @@ type Config struct {
 
 	AlwaysClearScreen bool `yaml:"always_clear_screen"`
 
+	// RoomListGroupByTag groups the room list into invites, favourites, low priority and other rooms.
+	// TODO move this to the terminal preferences once they exist (https://github.com/gomuks/gomuks/issues/661)
+	RoomListGroupByTag bool `yaml:"room_list_group_by_tag"`
+
 	LogConfig zeroconfig.Config `yaml:"log_config"`
 
 	Dir string `yaml:"-"`

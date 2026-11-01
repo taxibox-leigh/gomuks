@@ -187,6 +187,12 @@ func (view *MainView) OnKeyEvent(event mauview.KeyEvent) bool {
 		return view.flex.OnKeyEvent(tcell.NewEventKey(tcell.KeyEnter, '\n', event.Modifiers()|tcell.ModShift))
 	case "next_active_room":
 		view.SwitchRoom(view.roomList.NextWithActivity())
+	case "toggle_room_grouping":
+		view.roomList.ToggleGrouping()
+	case "toggle_room_group":
+		view.roomList.ToggleSelectedGroup()
+	case "toggle_all_room_groups":
+		view.roomList.ToggleAllGroups()
 	case "show_bare":
 		view.ShowBare(view.currentRoom)
 	case "force_quit":

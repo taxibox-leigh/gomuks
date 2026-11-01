@@ -121,6 +121,7 @@ func (ui *GomuksTUI) Run() {
 
 func (ui *GomuksTUI) Connect() {
 	ui.gmx.ReversedRoomList.Listen(func(_ []*store.RoomListEntry) {
+		ui.MainView.roomList.RoomListChanged()
 		ui.NeedsRender = true
 	})
 	ui.gmx.SendNotification = ui.MainView.NotifyMessage

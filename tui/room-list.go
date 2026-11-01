@@ -18,11 +18,12 @@ package tui
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 	"go.mau.fi/mauview"
 	"maunium.net/go/mautrix/id"
 
@@ -31,12 +32,24 @@ import (
 )
 
 type RoomList struct {
-	lock sync.RWMutex
+	lock sync.Mutex
 
 	parent *MainView
 
 	rooms    []*store.RoomListEntry
+	groups   []*store.RoomListGroup
+	rows     []roomListRow
 	selected id.RoomID
+
+	// grouped enables grouping rooms by tag.
+	grouped bool
+	// collapsed contains the IDs of collapsed groups.
+	collapsed map[string]bool
+	// roomListVersion is bumped whenever the store emits a new room list.
+	roomListVersion atomic.Uint64
+	builtVersion    uint64
+	// rowsDirty is set when the rows need to be rebuilt for reasons other than a new room list.
+	rowsDirty bool
 
 	scrollOffset int
 	height       int
@@ -55,76 +68,161 @@ func NewRoomList(parent *MainView) *RoomList {
 		parent: parent,
 
 		scrollOffset: 0,
+		rowsDirty:    true,
+		collapsed:    make(map[string]bool),
 
 		mainTextColor:           tcell.ColorDefault,
 		selectedTextColor:       tcell.ColorWhite,
 		selectedBackgroundColor: tcell.ColorDarkGreen,
 	}
+	if parent.config != nil {
+		list.grouped = parent.config.RoomListGroupByTag
+	}
 	return list
 }
 
-func (list *RoomList) SetSelected(roomID id.RoomID) {
-	list.selected = roomID
-	pos := list.index(roomID)
-	if pos <= list.scrollOffset {
-		list.scrollOffset = pos - 1
-	} else if pos >= list.scrollOffset+list.height {
-		list.scrollOffset = pos - list.height + 1
+// RoomListChanged marks the cached rows as outdated. It's called from the store's room list listener,
+// so it must not call back into the store.
+func (list *RoomList) RoomListChanged() {
+	list.roomListVersion.Add(1)
+}
+
+// ensureRows rebuilds the cached rows if the room list or the grouping state changed. The lock must be held.
+func (list *RoomList) ensureRows() {
+	if list.parent.matrix == nil {
+		return
+	}
+	version := list.roomListVersion.Load()
+	if !list.rowsDirty && version == list.builtVersion {
+		return
+	}
+	list.rooms = list.parent.matrix.ReversedRoomList.Current()
+	if list.grouped {
+		list.groups = store.GroupRoomList(list.rooms, store.DefaultTagGroups)
+	} else {
+		list.groups = nil
+	}
+	list.rows = buildRoomListRows(list.rooms, list.groups, list.collapsed, list.selected)
+	list.builtVersion = version
+	list.rowsDirty = false
+	list.clampScrollOffset()
+}
+
+func (list *RoomList) clampScrollOffset() {
+	if list.scrollOffset > len(list.rows)-list.height {
+		list.scrollOffset = len(list.rows) - list.height
 	}
 	if list.scrollOffset < 0 {
 		list.scrollOffset = 0
 	}
 }
 
+func (list *RoomList) scrollToSelected() {
+	pos := roomRowIndex(list.rows, list.selected)
+	if pos < 0 {
+		return
+	}
+	if pos <= list.scrollOffset {
+		list.scrollOffset = pos - 1
+	} else if pos >= list.scrollOffset+list.height {
+		list.scrollOffset = pos - list.height + 1
+	}
+	list.clampScrollOffset()
+}
+
+func (list *RoomList) SetSelected(roomID id.RoomID) {
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	list.selected = roomID
+	// The selected room is shown even inside collapsed groups, so the rows may change.
+	list.rowsDirty = list.rowsDirty || list.grouped
+	list.ensureRows()
+	list.scrollToSelected()
+}
+
 func (list *RoomList) HasSelected() bool {
+	list.lock.Lock()
+	defer list.lock.Unlock()
 	return list.selected != ""
 }
 
 func (list *RoomList) SelectedRoom() id.RoomID {
+	list.lock.Lock()
+	defer list.lock.Unlock()
 	return list.selected
 }
 
 func (list *RoomList) Previous() id.RoomID {
-	list.lock.RLock()
-	defer list.lock.RUnlock()
-	idx := list.index(list.selected)
-	if idx > 0 && idx < len(list.rooms) {
-		return list.rooms[idx-1].RoomID
-	}
-	return ""
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	list.ensureRows()
+	return adjacentRoom(list.rows, list.selected, -1)
 }
 
 func (list *RoomList) Next() id.RoomID {
-	list.lock.RLock()
-	defer list.lock.RUnlock()
-	if len(list.rooms) == 0 {
-		return ""
-	}
-	if list.selected == "" {
-		return list.rooms[0].RoomID
-	}
-	idx := list.index(list.selected)
-	if idx >= 0 && idx < len(list.rooms)-1 {
-		return list.rooms[idx+1].RoomID
-	}
-	return ""
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	list.ensureRows()
+	return adjacentRoom(list.rows, list.selected, 1)
 }
 
 func (list *RoomList) NextWithActivity() id.RoomID {
-	list.lock.RLock()
-	defer list.lock.RUnlock()
-	for _, room := range list.rooms {
-		if room.UnreadHighlights > 0 || room.UnreadMessages > 0 || room.MarkedUnread {
-			return room.RoomID
-		}
-	}
-	return ""
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	list.ensureRows()
+	return nextRoomWithActivity(list.rooms, list.groups, list.collapsed, list.selected)
 }
 
-func (list *RoomList) index(roomID id.RoomID) int {
-	return slices.IndexFunc(list.rooms, func(entry *store.RoomListEntry) bool {
-		return entry.RoomID == roomID
-	})
+// ToggleGrouping turns grouping rooms by tag on or off for this session.
+func (list *RoomList) ToggleGrouping() {
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	list.grouped = !list.grouped
+	list.rowsDirty = true
+	list.ensureRows()
+	list.scrollToSelected()
+}
+
+// ToggleSelectedGroup collapses the group containing the selected room, or expands it if it's already collapsed.
+func (list *RoomList) ToggleSelectedGroup() {
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	list.ensureRows()
+	group := groupOfRoom(list.groups, list.selected)
+	if group == nil {
+		return
+	}
+	list.setCollapsed(group.Filter.ID(), !list.collapsed[group.Filter.ID()])
+	list.scrollToSelected()
+}
+
+// ToggleAllGroups collapses all groups if any group is expanded, otherwise expands all groups.
+func (list *RoomList) ToggleAllGroups() {
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	list.ensureRows()
+	anyExpanded := false
+	for _, group := range list.groups {
+		if len(group.Rooms) > 0 && !list.collapsed[group.Filter.ID()] {
+			anyExpanded = true
+			break
+		}
+	}
+	for _, group := range list.groups {
+		list.setCollapsed(group.Filter.ID(), anyExpanded)
+	}
+	list.scrollToSelected()
+}
+
+// setCollapsed changes the collapsed state of a group. The lock must be held.
+func (list *RoomList) setCollapsed(groupID string, collapsed bool) {
+	if collapsed {
+		list.collapsed[groupID] = true
+	} else {
+		delete(list.collapsed, groupID)
+	}
+	list.rowsDirty = true
+	list.ensureRows()
 }
 
 func (list *RoomList) OnKeyEvent(_ mauview.KeyEvent) bool {
@@ -148,26 +246,30 @@ func (list *RoomList) OnMouseEvent(event mauview.MouseEvent) bool {
 		return true
 	case tcell.Button1:
 		_, y := event.Position()
-		list.lock.RLock()
-		defer list.lock.RUnlock()
+		list.lock.Lock()
 		y += list.scrollOffset
-		if y < 0 || y > len(list.rooms) {
+		if y < 0 || y >= len(list.rows) {
+			list.lock.Unlock()
 			return false
 		}
-		list.parent.SwitchRoom(list.rooms[y].RoomID)
+		row := list.rows[y]
+		if row.group != nil {
+			list.setCollapsed(row.group.Filter.ID(), !row.collapsed)
+			list.lock.Unlock()
+			return true
+		}
+		list.lock.Unlock()
+		list.parent.SwitchRoom(row.room.RoomID)
 		return true
 	}
 	return false
 }
 
 func (list *RoomList) addScrollOffset(offset int) {
+	list.lock.Lock()
+	defer list.lock.Unlock()
 	list.scrollOffset += offset
-	if list.scrollOffset > len(list.rooms)-list.height {
-		list.scrollOffset = len(list.rooms) - list.height
-	}
-	if list.scrollOffset < 0 {
-		list.scrollOffset = 0
-	}
+	list.clampScrollOffset()
 }
 
 func (list *RoomList) Focus() {}
@@ -175,33 +277,74 @@ func (list *RoomList) Blur()  {}
 
 func (list *RoomList) Draw(screen mauview.Screen) {
 	list.lock.Lock()
-	list.rooms = list.parent.matrix.ReversedRoomList.Current()
 	list.width, list.height = screen.Size()
-	roomSlice := list.rooms[min(len(list.rooms), list.scrollOffset):min(len(list.rooms), list.scrollOffset+list.height)]
+	list.ensureRows()
+	list.clampScrollOffset()
+	rowSlice := list.rows[min(len(list.rows), list.scrollOffset):min(len(list.rows), list.scrollOffset+list.height)]
+	selected := list.selected
+	width := list.width
 	list.lock.Unlock()
 
-	for y, room := range roomSlice {
-		style := tcell.StyleDefault.
-			Foreground(list.mainTextColor).
-			Bold(room.MarkedUnread || room.UnreadNotifications > 0 || room.UnreadHighlights > 0)
-		if room.RoomID == list.selected {
-			style = style.
-				Foreground(list.selectedTextColor).
-				Background(list.selectedBackgroundColor)
+	for y, row := range rowSlice {
+		if row.group != nil {
+			list.drawGroupHeader(screen, y, width, row.group, row.collapsed)
+		} else {
+			list.drawRoom(screen, y, width, row.room, row.room.RoomID == selected)
 		}
+	}
+}
 
-		widget.WriteLinePadded(screen, mauview.AlignLeft, room.Name, 0, y, list.width, style)
+func formatUnreadCount(count int, highlight bool) string {
+	str := "99+"
+	if count < 1000 {
+		str = strconv.Itoa(count)
+	}
+	if highlight {
+		str += "!"
+	}
+	return fmt.Sprintf("(%s)", str)
+}
 
-		if room.UnreadMessages > 0 {
-			unreadMessageCount := "99+"
-			if room.UnreadMessages < 1000 {
-				unreadMessageCount = strconv.Itoa(room.UnreadMessages)
-			}
-			if room.UnreadHighlights > 0 {
-				unreadMessageCount += "!"
-			}
-			unreadMessageCount = fmt.Sprintf("(%s)", unreadMessageCount)
-			widget.WriteLine(screen, mauview.AlignRight, unreadMessageCount, list.width-7, y, 7, style)
+func (list *RoomList) drawRoom(screen mauview.Screen, y, width int, room *store.RoomListEntry, selected bool) {
+	style := tcell.StyleDefault.
+		Foreground(list.mainTextColor).
+		Bold(room.MarkedUnread || room.UnreadNotifications > 0 || room.UnreadHighlights > 0)
+	if selected {
+		style = style.
+			Foreground(list.selectedTextColor).
+			Background(list.selectedBackgroundColor)
+	}
+
+	widget.WriteLinePadded(screen, mauview.AlignLeft, room.Name, 0, y, width, style)
+
+	if room.UnreadMessages > 0 {
+		unreadMessageCount := formatUnreadCount(room.UnreadMessages, room.UnreadHighlights > 0)
+		widget.WriteLine(screen, mauview.AlignRight, unreadMessageCount, width-7, y, 7, style)
+	}
+}
+
+func (list *RoomList) drawGroupHeader(screen mauview.Screen, y, width int, group *store.RoomListGroup, collapsed bool) {
+	glyph := "▼"
+	badge := ""
+	if collapsed {
+		glyph = "▶"
+		if group.UnreadRooms > 0 {
+			badge = formatUnreadCount(group.UnreadRooms, group.Highlights)
 		}
+	}
+	style := tcell.StyleDefault.
+		Foreground(list.mainTextColor).
+		Bold(collapsed && group.Highlights)
+	count := " " + strconv.Itoa(len(group.Rooms))
+	// Truncate the name first, so the glyph and counts always fit.
+	nameWidth := width - runewidth.StringWidth(glyph) - 1 - runewidth.StringWidth(count)
+	if badge != "" {
+		nameWidth -= runewidth.StringWidth(badge) + 1
+	}
+	name := runewidth.Truncate(group.Filter.Name(), max(nameWidth, 0), "…")
+	widget.WriteLinePadded(screen, mauview.AlignLeft, glyph+" "+name+count, 0, y, width, style)
+	if badge != "" {
+		badgeWidth := runewidth.StringWidth(badge)
+		widget.WriteLine(screen, mauview.AlignRight, badge, width-badgeWidth, y, badgeWidth, style)
 	}
 }
