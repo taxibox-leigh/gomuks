@@ -44,6 +44,10 @@ type Preferences struct {
 	ThemeColorDark          string `json:"theme_color_dark,omitempty"`
 	LowBandwidth            bool   `json:"low_bandwidth,omitempty"`
 	WebPush                 bool   `json:"web_push,omitempty"`
+	PinFavorites            bool   `json:"pin_favorites,omitempty"`
+	PinLowPriority          bool   `json:"pin_low_priority,omitempty"`
+	MuteLowPriority         bool   `json:"mute_low_priority,omitempty"`
+	AlphabeticalOrder       bool   `json:"alphabetical_order,omitempty"`
 }
 
 var DefaultPreferences = Preferences{

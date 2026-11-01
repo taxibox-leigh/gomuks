@@ -8,6 +8,7 @@ package store
 
 import (
 	"encoding/json"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ type RoomListEntry struct {
 	Avatar           id.ContentURI
 	MarkedUnread     bool
 	IsInvite         bool
+	Tags             event.Tags
 	database.UnreadCounts
 }
 
@@ -67,6 +69,7 @@ func roomListEntryChanged(entry *jsoncmd.SyncRoom, oldMeta *database.Room) bool 
 		entry.Meta.PreviewEventRowID != oldMeta.PreviewEventRowID ||
 		ptr.Val(entry.Meta.Name) != ptr.Val(oldMeta.Name) ||
 		ptr.Val(entry.Meta.Avatar) != ptr.Val(oldMeta.Avatar) ||
+		!maps.Equal(entry.Meta.Tags, oldMeta.Tags) ||
 		slices.ContainsFunc(entry.Timeline, func(tuple database.TimelineRowTuple) bool {
 			return tuple.Event == entry.Meta.PreviewEventRowID
 		})
@@ -112,12 +115,23 @@ func (gs *GomuksStore) makeRoomListEntry(roomStore *RoomStore) *RoomListEntry {
 		SearchName:       toSearchableString(name),
 		Avatar:           ptr.Val(meta.Avatar),
 		MarkedUnread:     ptr.Val(meta.MarkedUnread),
+		Tags:             meta.Tags,
 		UnreadCounts:     meta.UnreadCounts,
+	}
+	if entry.IsLowPriority() && gs.preferences().MuteLowPriority {
+		entry.UnreadMessages = 0
 	}
 	if entry.PreviewEvent != nil {
 		entry.PreviewSender = roomStore.GetStateEvent(event.StateMember, entry.PreviewEvent.Sender.String())
 	}
 	return entry
+}
+
+func (gs *GomuksStore) preferences() *Preferences {
+	if prefs := gs.PreferenceCache.Current(); prefs != nil {
+		return prefs
+	}
+	return &DefaultPreferences
 }
 
 func (gs *GomuksStore) ApplySync(sync *jsoncmd.SyncComplete) {
@@ -130,6 +144,9 @@ func (gs *GomuksStore) ApplySync(sync *jsoncmd.SyncComplete) {
 		if evtType == AccountDataGomuksPreferences {
 			parsedPreferences := DefaultPreferences
 			_ = json.Unmarshal(ad.Content, &parsedPreferences)
+			if roomListSortPrefsChanged(gs.PreferenceCache.Current(), &parsedPreferences) {
+				resyncRoomList = true
+			}
 			gs.PreferenceCache.Emit(&parsedPreferences)
 		}
 		gs.accountData[evtType] = ad
@@ -168,6 +185,7 @@ func (gs *GomuksStore) ApplySync(sync *jsoncmd.SyncComplete) {
 		changedRoomListEntries[roomID] = nil
 	}
 	var updatedRoomList []*RoomListEntry
+	sortFunc, isTimestampSort := RoomListSortFunc(gs.preferences())
 	if resyncRoomList {
 		updatedRoomList = make([]*RoomListEntry, 0, len(gs.rooms)+len(gs.invitedRooms))
 		for _, inviteRoom := range gs.invitedRooms {
@@ -179,9 +197,7 @@ func (gs *GomuksStore) ApplySync(sync *jsoncmd.SyncComplete) {
 				updatedRoomList = append(updatedRoomList, entry)
 			}
 		}
-		slices.SortFunc(updatedRoomList, func(a, b *RoomListEntry) int {
-			return a.SortingTimestamp.Compare(b.SortingTimestamp)
-		})
+		slices.SortStableFunc(updatedRoomList, sortFunc)
 	} else if len(changedRoomListEntries) > 0 {
 		updatedRoomList = slices.DeleteFunc(gs.roomList, func(entry *RoomListEntry) bool {
 			_, didChange := changedRoomListEntries[entry.RoomID]
@@ -191,7 +207,15 @@ func (gs *GomuksStore) ApplySync(sync *jsoncmd.SyncComplete) {
 			if entry == nil {
 				continue
 			}
-			if len(updatedRoomList) == 0 || !entry.SortingTimestamp.Before(updatedRoomList[len(updatedRoomList)-1].SortingTimestamp) {
+			if !isTimestampSort {
+				i := slices.IndexFunc(updatedRoomList, func(val *RoomListEntry) bool {
+					return sortFunc(val, entry) > 0
+				})
+				if i == -1 {
+					i = len(updatedRoomList)
+				}
+				updatedRoomList = slices.Insert(updatedRoomList, i, entry)
+			} else if len(updatedRoomList) == 0 || !entry.SortingTimestamp.Before(updatedRoomList[len(updatedRoomList)-1].SortingTimestamp) {
 				updatedRoomList = append(updatedRoomList, entry)
 			} else if entry.SortingTimestamp.Before(updatedRoomList[0].SortingTimestamp) {
 				updatedRoomList = append([]*RoomListEntry{entry}, updatedRoomList...)
