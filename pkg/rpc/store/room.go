@@ -133,6 +133,13 @@ func (rs *RoomStore) notifyTimelineWatchers() {
 	rs.editTargets = ownMessages
 }
 
+// GetAccountData returns the room account data event of the given type, or nil if there isn't one.
+func (rs *RoomStore) GetAccountData(evtType event.Type) *database.AccountData {
+	rs.lock.RLock()
+	defer rs.lock.RUnlock()
+	return rs.accountData[evtType]
+}
+
 func (rs *RoomStore) ApplySync(sync *jsoncmd.SyncRoom) {
 	rs.lock.Lock()
 	defer rs.lock.Unlock()

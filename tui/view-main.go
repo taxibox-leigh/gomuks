@@ -194,6 +194,8 @@ func (view *MainView) OnKeyEvent(event mauview.KeyEvent) bool {
 		if view.currentRoom != nil {
 			view.currentRoom.MessageView().Invalidate()
 		}
+	case "toggle_low_priority":
+		view.ToggleCurrentRoomTag(lowPriorityTag)
 	case "toggle_room_grouping":
 		view.roomList.ToggleGrouping()
 	case "toggle_room_group":
