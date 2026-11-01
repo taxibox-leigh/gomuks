@@ -187,6 +187,13 @@ func (view *MainView) OnKeyEvent(event mauview.KeyEvent) bool {
 		return view.flex.OnKeyEvent(tcell.NewEventKey(tcell.KeyEnter, '\n', event.Modifiers()|tcell.ModShift))
 	case "next_active_room":
 		view.SwitchRoom(view.roomList.NextWithActivity())
+	case "toggle_user_list":
+		view.config.Preferences.HideUserList = !view.config.Preferences.HideUserList
+	case "toggle_timestamps":
+		view.config.Preferences.HideTimestamp = !view.config.Preferences.HideTimestamp
+		if view.currentRoom != nil {
+			view.currentRoom.MessageView().Invalidate()
+		}
 	case "toggle_room_grouping":
 		view.roomList.ToggleGrouping()
 	case "toggle_room_group":

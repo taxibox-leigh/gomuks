@@ -52,6 +52,18 @@ type UserPreferences struct {
 	DisableShowURLs      bool `yaml:"disable_show_urls"`
 
 	InlineURLMode string `yaml:"inline_url_mode"`
+
+	// SenderWidth is the width of the sender column in the message view. Values below 1 use the default.
+	SenderWidth int `yaml:"sender_width"`
+}
+
+const DefaultSenderWidth = 15
+
+func (up *UserPreferences) GetSenderWidth() int {
+	if up.SenderWidth < 1 {
+		return DefaultSenderWidth
+	}
+	return up.SenderWidth
 }
 
 var InlineURLsProbablySupported bool
@@ -111,7 +123,8 @@ type Config struct {
 
 	Dir string `yaml:"-"`
 
-	Preferences UserPreferences   `yaml:"-"`
+	// TODO move these to the terminal preferences once they exist (https://github.com/gomuks/gomuks/issues/661)
+	Preferences UserPreferences   `yaml:"preferences"`
 	Keybindings ParsedKeybindings `yaml:"-"`
 
 	nosave bool

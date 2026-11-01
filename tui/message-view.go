@@ -63,7 +63,7 @@ func NewMessageView(parent *RoomView) *MessageView {
 		config: parent.config,
 		matrix: parent.parent.matrix,
 
-		SenderWidth:    15,
+		SenderWidth:    parent.config.Preferences.GetSenderWidth(),
 		TimestampWidth: len(messages.TimeFormat),
 	}
 	return mv
@@ -372,6 +372,13 @@ func (view *MessageView) Draw(screen mauview.Screen) {
 		msg.Draw(mauview.NewProxyScreen(screen, messageX, line, width-messageX, msg.Height()))
 		line += msg.Height()
 	}
+}
+
+// Invalidate makes the next draw recalculate message line wrapping, e.g. after the timestamp column was toggled.
+func (view *MessageView) Invalidate() {
+	view.lock.Lock()
+	view.prevWidth = -1
+	view.lock.Unlock()
 }
 
 func (view *MessageView) update(width int) {
