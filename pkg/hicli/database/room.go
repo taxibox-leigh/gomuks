@@ -9,8 +9,10 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -28,7 +30,7 @@ const (
 		SELECT room_id, creation_content, tombstone_content, name, name_quality,
 		       avatar, explicit_avatar, dm_user_id, topic, canonical_alias,
 		       lazy_load_summary, encryption_event, has_member_list, preview_event_rowid, sorting_timestamp,
-		       unread_highlights, unread_notifications, unread_messages, marked_unread, prev_batch
+		       unread_highlights, unread_notifications, unread_messages, marked_unread, tags, prev_batch
 		FROM room
 	`
 	getRoomsBySortingTimestampQuery = getRoomBaseQuery + `WHERE sorting_timestamp < $1 AND sorting_timestamp > 0 AND room_type<>'m.space' ORDER BY sorting_timestamp DESC LIMIT $2`
@@ -61,7 +63,8 @@ const (
 			unread_notifications = COALESCE($17, room.unread_notifications),
 			unread_messages = COALESCE($18, room.unread_messages),
 			marked_unread = COALESCE($19, room.marked_unread),
-			prev_batch = COALESCE($20, room.prev_batch)
+			tags = COALESCE($20, room.tags),
+			prev_batch = COALESCE($21, room.prev_batch)
 		WHERE room_id = $1
 	`
 	bumpRoomModTimestampQuery = `
@@ -213,6 +216,9 @@ type Room struct {
 	SortingTimestamp  jsontime.UnixMilli `json:"sorting_timestamp"`
 	UnreadCounts
 	MarkedUnread *bool `json:"marked_unread,omitempty"`
+	// Tags is the content of the m.tag room account data event.
+	// In updates, nil means unchanged and a non-nil (possibly empty) map replaces the old value.
+	Tags event.Tags `json:"tags,omitempty"`
 
 	PrevBatch string `json:"-"`
 }
@@ -320,6 +326,10 @@ func (r *Room) CheckChangesAndCopyInto(other *Room) (hasChanges, hasSyncableChan
 		other.MarkedUnread = r.MarkedUnread
 		hasChanges = true
 	}
+	if r.Tags != nil && !maps.Equal(r.Tags, other.Tags) {
+		other.Tags = r.Tags
+		hasChanges = true
+	}
 	hasSyncableChanges = hasChanges
 	if r.PrevBatch != "" && r.PrevBatch != other.PrevBatch {
 		other.PrevBatch = r.PrevBatch
@@ -330,6 +340,7 @@ func (r *Room) CheckChangesAndCopyInto(other *Room) (hasChanges, hasSyncableChan
 
 func (r *Room) Scan(row dbutil.Scannable) (*Room, error) {
 	var prevBatch sql.NullString
+	var tags []byte
 	var previewEventRowID, sortingTimestamp sql.NullInt64
 	err := row.Scan(
 		&r.ID,
@@ -351,12 +362,16 @@ func (r *Room) Scan(row dbutil.Scannable) (*Room, error) {
 		&r.UnreadNotifications,
 		&r.UnreadMessages,
 		&r.MarkedUnread,
+		&tags,
 		&prevBatch,
 	)
 	if err != nil {
 		return nil, err
 	}
 	r.PrevBatch = prevBatch.String
+	if tags != nil {
+		r.Tags = ParseRoomTags(tags)
+	}
 	r.PreviewEventRowID = EventRowID(previewEventRowID.Int64)
 	r.SortingTimestamp = jsontime.UMInt(sortingTimestamp.Int64)
 	return r, nil
@@ -383,8 +398,42 @@ func (r *Room) sqlVariables() []any {
 		r.UnreadNotifications,
 		r.UnreadMessages,
 		r.MarkedUnread,
+		tagsForDB(r.Tags),
 		dbutil.StrPtr(r.PrevBatch),
 	}
+}
+
+// ParseRoomTags parses the content of an m.tag room account data event.
+//
+// Parsing is lenient: a tag whose metadata is malformed (e.g. a non-numeric order) is kept with empty metadata,
+// so a single bad entry doesn't hide the room's other tags. Returns an empty non-nil map if there are no tags.
+func ParseRoomTags(content json.RawMessage) event.Tags {
+	var raw struct {
+		Tags map[event.RoomTag]json.RawMessage `json:"tags"`
+	}
+	tags := make(event.Tags)
+	if json.Unmarshal(content, &raw) != nil {
+		return tags
+	}
+	for tag, rawMeta := range raw.Tags {
+		var meta event.TagMetadata
+		if json.Unmarshal(rawMeta, &meta) != nil {
+			meta = event.TagMetadata{}
+		}
+		tags[tag] = meta
+	}
+	return tags
+}
+
+func tagsForDB(tags event.Tags) any {
+	if tags == nil {
+		return nil
+	}
+	data, err := json.Marshal(&event.TagEventContent{Tags: tags})
+	if err != nil {
+		return nil
+	}
+	return string(data)
 }
 
 func (r *Room) BumpSortingTimestamp(evt *Event) bool {

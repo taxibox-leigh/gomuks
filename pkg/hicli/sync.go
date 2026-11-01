@@ -1257,6 +1257,10 @@ func (h *HiClient) processStateAndTimeline(
 	if ok {
 		updatedRoom.MarkedUnread = ptr.Ptr(gjson.GetBytes(mu.Content, "unread").Bool())
 	}
+	tags, ok := accountData[event.AccountDataRoomTags]
+	if ok {
+		updatedRoom.Tags = database.ParseRoomTags(tags.Content)
+	}
 
 	if len(receipts) > 0 {
 		err = h.DB.Receipt.PutMany(ctx, room.ID, receipts...)
