@@ -19,6 +19,7 @@ package tui
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,6 +76,48 @@ func (view *MessageView) SetSelected(message *messages.UIMessage) {
 	} else {
 		view.selected = message.RowID
 	}
+}
+
+// SelectAdjacent moves the selection to the next (dir > 0) or previous (dir < 0) non-service message and scrolls
+// it into view. With nothing selected, moving backwards selects the newest message.
+func (view *MessageView) SelectAdjacent(dir int) {
+	view.lock.Lock()
+	defer view.lock.Unlock()
+	// msgBuffer has one entry per line, so consecutive duplicates are the same message.
+	var msgs []*messages.UIMessage
+	var firstLines []int
+	for line, msg := range view.msgBuffer {
+		if msg.IsService || (len(msgs) > 0 && msgs[len(msgs)-1] == msg) {
+			continue
+		}
+		msgs = append(msgs, msg)
+		firstLines = append(firstLines, line)
+	}
+	idx := slices.IndexFunc(msgs, func(msg *messages.UIMessage) bool {
+		return view.selected != 0 && msg.RowID == view.selected
+	})
+	if idx == -1 {
+		if dir > 0 || len(msgs) == 0 {
+			return
+		}
+		idx = len(msgs)
+	}
+	next := idx + dir
+	if next < 0 || next >= len(msgs) {
+		return
+	}
+	view.selected = msgs[next].RowID
+
+	// Scroll so that the first line of the message is visible.
+	total, height := len(view.msgBuffer), view.Height()
+	offset := int(view.ScrollOffset.Load())
+	line := firstLines[next]
+	if top := total - offset - height; line < top {
+		offset = total - line - height
+	} else if line >= total-offset {
+		offset = total - line - msgs[next].Height()
+	}
+	view.ScrollOffset.Store(int32(max(offset, 0)))
 }
 
 func (view *MessageView) GetSelected() *messages.UIMessage {
@@ -154,6 +197,15 @@ func (view *MessageView) OnMouseEvent(event mauview.MouseEvent) bool {
 		view.AddScrollOffset(-WheelScrollOffsetDiff)
 		view.parent.parent.MarkRead(view.parent)
 		return true
+	case tcell.Button2:
+		// Right click opens the reaction picker.
+		_, y := event.Position()
+		message := view.messageAtLine(y)
+		if message == nil {
+			return false
+		}
+		view.parent.OpenReactionPicker(message)
+		return true
 	case tcell.Button1:
 		x, y := event.Position()
 		line := view.TotalHeight() - int(view.ScrollOffset.Load()) - view.Height() + y
@@ -182,6 +234,17 @@ func (view *MessageView) OnMouseEvent(event mauview.MouseEvent) bool {
 		}
 	}
 	return false
+}
+
+// messageAtLine returns the message drawn at the given line of the message view, or nil.
+func (view *MessageView) messageAtLine(y int) *messages.UIMessage {
+	view.lock.RLock()
+	defer view.lock.RUnlock()
+	line := view.TotalHeight() - int(view.ScrollOffset.Load()) - view.Height() + y
+	if line < 0 || line >= len(view.msgBuffer) {
+		return nil
+	}
+	return view.msgBuffer[line]
 }
 
 const PaddingAtTop = 5

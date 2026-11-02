@@ -55,6 +55,8 @@ type UserPreferences struct {
 
 	// SenderWidth is the width of the sender column in the message view. Values below 1 use the default.
 	SenderWidth int `yaml:"sender_width"`
+	// QuickReactions are the emojis shown in the reaction picker.
+	QuickReactions []string `yaml:"quick_reactions"`
 }
 
 const DefaultSenderWidth = 15

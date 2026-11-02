@@ -204,7 +204,11 @@ func (view *RoomView) OnSelect(message *messages.UIMessage) {
 	case SelectEdit:
 		view.SetEditing(message.Event)
 	case SelectReact:
-		go view.SendReaction(message.ID, view.selectContent)
+		if len(view.selectContent) > 0 {
+			go view.SendReaction(message.ID, view.selectContent)
+		} else {
+			view.OpenReactionPicker(message)
+		}
 	case SelectRedact:
 		go view.Redact(message.ID, view.selectContent)
 	case SelectDownload, SelectOpen:
@@ -384,6 +388,9 @@ func (view *RoomView) OnKeyEvent(event mauview.KeyEvent) bool {
 	case "send":
 		view.InputSubmit(view.input.GetText())
 		return true
+	case "react":
+		view.StartSelecting(SelectReact, "")
+		return true
 	}
 	return view.input.OnKeyEvent(event)
 }
@@ -513,32 +520,11 @@ func (view *RoomView) EditPrevious() {
 }
 
 func (view *RoomView) SelectNext() {
-	//msgView := view.MessageView()
-	//if msgView.selected == 0 {
-	//	return
-	//}
-	//var filter findFilter
-	//if view.selectReason == SelectDownload || view.selectReason == SelectOpen {
-	//	filter = view.filterMediaOnly
-	//}
-	//foundMsg := view.findMessage(msgView.selected.GetEvent(), true, filter)
-	//if foundMsg != nil {
-	//	msgView.SetSelected(foundMsg)
-	//	// TODO scroll selected message into view
-	//}
+	view.MessageView().SelectAdjacent(1)
 }
 
 func (view *RoomView) SelectPrevious() {
-	//msgView := view.MessageView()
-	//var filter findFilter
-	//if view.selectReason == SelectDownload || view.selectReason == SelectOpen {
-	//	filter = view.filterMediaOnly
-	//}
-	//foundMsg := view.findMessage(msgView.selected.GetEvent(), false, filter)
-	//if foundMsg != nil {
-	//	msgView.SetSelected(foundMsg)
-	//	// TODO scroll selected message into view
-	//}
+	view.MessageView().SelectAdjacent(-1)
 }
 
 type completion struct {
@@ -740,6 +726,14 @@ func (view *RoomView) Redact(eventID id.EventID, reason string) {
 		//view.AddServiceMessage(fmt.Sprintf("Failed to redact message: %v", err))
 		//view.parent.parent.Render()
 	}
+}
+
+// OpenReactionPicker shows the quick reaction picker for the given message.
+func (view *RoomView) OpenReactionPicker(message *messages.UIMessage) {
+	if message == nil || message.IsService || message.Event == nil || message.ID == "" {
+		return
+	}
+	view.parent.ShowModal(NewReactionModal(view, message.Event))
 }
 
 func (view *RoomView) SendReaction(eventID id.EventID, reaction string) {
